@@ -1,0 +1,26 @@
+# Gitignore for backend & frontend
+
+# Ignore node_modules in both backend and frontend
+backend/node_modules/
+frontend/node_modules/
+
+# Ignore lock files if không muốn quản lý version lock
+backend/package-lock.json
+frontend/package-lock.json
+
+# Ignore environment files
+*.env
+
+# Ignore database files
+*.db
+
+# Ignore build/dist output
+backend/dist/
+frontend/dist/
+backend/build/
+frontend/build/
+
+# Ignore OS/system files
+.DS_Store
+Thumbs.db
+
