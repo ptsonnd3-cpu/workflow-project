@@ -30,13 +30,104 @@ const buildBpmnFromActivities = (workflowId, activities = [], transitions = []) 
     transitions
   });
 
+  // Create intelligent positioning based on flow
   const positions = {};
-  const y = 150;
-  let x = 200;
-
-  activities.forEach((a, idx) => {
-    positions[`Activity_${a.id}`] = { x: x + idx * 160, y };
+  const activityMap = {};
+  
+  // Build activity lookup map
+  activities.forEach(a => {
+    activityMap[a.id] = a;
   });
+  
+  // Create flow-based positioning
+  const layoutActivities = () => {
+    let currentX = 100;
+    let currentY = 120;
+    const yIncrement = 120;
+    const xIncrement = 200;
+    
+    // Find start and end activities
+    const startActivity = activities.find(a => a.type === 'start');
+    const endActivity = activities.find(a => a.type === 'end');
+    
+    // Position start activity
+    if (startActivity) {
+      positions[`Activity_${startActivity.id}`] = { x: currentX, y: currentY };
+      currentX += xIncrement;
+    }
+    
+    // Track positioned activities and queue for processing
+    const positioned = new Set(startActivity ? [startActivity.id] : []);
+    const queue = startActivity ? [startActivity.id] : [];
+    let maxX = currentX; // Track rightmost position for end activity
+    
+    while (queue.length > 0) {
+      const currentActivityId = queue.shift();
+      const currentPos = positions[`Activity_${currentActivityId}`];
+      
+      // Find outgoing transitions (exclude transitions TO end activity for now)
+      const outgoingTransitions = transitions.filter(t => 
+        t.from_activity_id === currentActivityId && 
+        (!endActivity || t.to_activity_id !== endActivity.id)
+      );
+      
+      if (outgoingTransitions.length === 1) {
+        // Single path - continue horizontally
+        const nextActivity = activityMap[outgoingTransitions[0].to_activity_id];
+        if (nextActivity && !positioned.has(nextActivity.id)) {
+          const nextX = currentPos.x + xIncrement;
+          positions[`Activity_${nextActivity.id}`] = { 
+            x: nextX, 
+            y: currentPos.y 
+          };
+          maxX = Math.max(maxX, nextX + xIncrement);
+          positioned.add(nextActivity.id);
+          queue.push(nextActivity.id);
+        }
+      } else if (outgoingTransitions.length > 1) {
+        // Multiple paths - create branches vertically with proper spacing
+        const branchSpacing = Math.max(yIncrement, 120);
+        let branchY = currentPos.y - ((outgoingTransitions.length - 1) * branchSpacing / 2);
+        
+        // Sort transitions to ensure consistent ordering
+        const sortedTransitions = outgoingTransitions.sort((a, b) => {
+          if (a.condition === 'Approved') return -1;
+          if (b.condition === 'Approved') return 1;
+          if (a.condition === 'Rejected') return 1;
+          if (b.condition === 'Rejected') return -1;
+          return a.priority - b.priority;
+        });
+        
+        sortedTransitions.forEach((transition, index) => {
+          const nextActivity = activityMap[transition.to_activity_id];
+          if (nextActivity && !positioned.has(nextActivity.id)) {
+            const nextX = currentPos.x + xIncrement;
+            const nextY = branchY + (index * branchSpacing);
+            positions[`Activity_${nextActivity.id}`] = { x: nextX, y: nextY };
+            maxX = Math.max(maxX, nextX + xIncrement);
+            positioned.add(nextActivity.id);
+            queue.push(nextActivity.id);
+          }
+        });
+      }
+    }
+    
+    // Position end activity at the rightmost position
+    if (endActivity && !positioned.has(endActivity.id)) {
+      positions[`Activity_${endActivity.id}`] = { x: maxX, y: currentY };
+      positioned.add(endActivity.id);
+    }
+    
+    // Position any remaining activities
+    activities.forEach(a => {
+      if (!positioned.has(a.id)) {
+        positions[`Activity_${a.id}`] = { x: maxX + xIncrement, y: currentY };
+        maxX += xIncrement;
+      }
+    });
+  };
+  
+  layoutActivities();
 
   const tasksXml = activities.map((a) => {
     const id = `Activity_${a.id}`;
@@ -90,16 +181,108 @@ const buildBpmnFromActivities = (workflowId, activities = [], transitions = []) 
     
     if (sourcePos && targetPos) {
       const sourceActivity = activities.find(a => a.id === t.from_activity_id);
-      let sourceWidth = 100;
+      const targetActivity = activities.find(a => a.id === t.to_activity_id);
+      
+      // Calculate source dimensions and exit point
+      let sourceWidth = 100, sourceHeight = 80;
       if (sourceActivity && (sourceActivity.type === 'parallelGateway' || sourceActivity.type === 'exclusiveGateway')) {
-        sourceWidth = 50;
+        sourceWidth = sourceHeight = 50;
       } else if (sourceActivity && (sourceActivity.type === 'start' || sourceActivity.type === 'end')) {
-        sourceWidth = 36;
+        sourceWidth = sourceHeight = 36;
+      }
+      
+      // Calculate target dimensions and entry point
+      let targetWidth = 100, targetHeight = 80;
+      if (targetActivity && (targetActivity.type === 'parallelGateway' || targetActivity.type === 'exclusiveGateway')) {
+        targetWidth = targetHeight = 50;
+      } else if (targetActivity && (targetActivity.type === 'start' || targetActivity.type === 'end')) {
+        targetWidth = targetHeight = 36;
+      }
+      
+      // Calculate connection points at shape borders
+      const sourceCenterX = sourcePos.x + sourceWidth / 2;
+      const sourceCenterY = sourcePos.y + sourceHeight / 2;
+      const targetCenterX = targetPos.x + targetWidth / 2;
+      const targetCenterY = targetPos.y + targetHeight / 2;
+      
+      // Determine exit and entry points with proper margins
+      let sourceExitX, sourceExitY, targetEntryX, targetEntryY;
+      
+      if (targetPos.x > sourcePos.x + sourceWidth) {
+        // Target is clearly to the right - exit from right side, enter from left side
+        sourceExitX = sourcePos.x + sourceWidth;
+        sourceExitY = sourceCenterY;
+        targetEntryX = targetPos.x;
+        targetEntryY = targetCenterY;
+      } else if (targetPos.x + targetWidth < sourcePos.x) {
+        // Target is clearly to the left - exit from left side, enter from right side
+        sourceExitX = sourcePos.x;
+        sourceExitY = sourceCenterY;
+        targetEntryX = targetPos.x + targetWidth;
+        targetEntryY = targetCenterY;
+      } else {
+        // Overlapping X positions - use vertical connection
+        if (targetPos.y > sourcePos.y + sourceHeight) {
+          // Target below - exit from bottom, enter from top
+          sourceExitX = sourceCenterX;
+          sourceExitY = sourcePos.y + sourceHeight;
+          targetEntryX = targetCenterX;
+          targetEntryY = targetPos.y;
+        } else if (targetPos.y + targetHeight < sourcePos.y) {
+          // Target above - exit from top, enter from bottom
+          sourceExitX = sourceCenterX;
+          sourceExitY = sourcePos.y;
+          targetEntryX = targetCenterX;
+          targetEntryY = targetPos.y + targetHeight;
+        } else {
+          // Shapes overlap - use right to left connection with small offset
+          sourceExitX = sourcePos.x + sourceWidth;
+          sourceExitY = sourceCenterY;
+          targetEntryX = targetPos.x;
+          targetEntryY = targetCenterY;
+        }
+      }
+      
+      // Create waypoints for orthogonal routing with better spacing
+      let waypoints = [];
+      
+      // Check if direct connection is appropriate (same horizontal level)
+      if (Math.abs(sourceExitY - targetEntryY) < 15 && targetEntryX > sourceExitX) {
+        waypoints = [
+          `<di:waypoint x="${sourceExitX}" y="${sourceExitY}" />`,
+          `<di:waypoint x="${targetEntryX}" y="${targetEntryY}" />`
+        ];
+      }
+      // Orthogonal routing with proper clearance
+      else {
+        const horizontalGap = targetEntryX - sourceExitX;
+        const verticalGap = targetEntryY - sourceExitY;
+        
+        if (horizontalGap > 0) {
+          // Normal left-to-right flow
+          const midX = sourceExitX + horizontalGap / 2;
+          
+          waypoints = [
+            `<di:waypoint x="${sourceExitX}" y="${sourceExitY}" />`,
+            `<di:waypoint x="${midX}" y="${sourceExitY}" />`,
+            `<di:waypoint x="${midX}" y="${targetEntryY}" />`,
+            `<di:waypoint x="${targetEntryX}" y="${targetEntryY}" />`
+          ];
+        } else {
+          // Backward flow or complex routing
+          const clearanceX = sourceExitX + 50; // Move out first
+          
+          waypoints = [
+            `<di:waypoint x="${sourceExitX}" y="${sourceExitY}" />`,
+            `<di:waypoint x="${clearanceX}" y="${sourceExitY}" />`,
+            `<di:waypoint x="${clearanceX}" y="${targetEntryY}" />`,
+            `<di:waypoint x="${targetEntryX}" y="${targetEntryY}" />`
+          ];
+        }
       }
 
       return `      <bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">
-        <di:waypoint x="${sourcePos.x + sourceWidth/2}" y="${sourcePos.y + 40}" />
-        <di:waypoint x="${targetPos.x + 50}" y="${targetPos.y + 40}" />
+        ${waypoints.join('\n        ')}
       </bpmndi:BPMNEdge>`;
     }
     return '';
@@ -151,6 +334,7 @@ const BPMNEditor = ({
   console.log('🔍 BPMNEditor received props:', {
     workflowId,
     bpmnXml: bpmnXml ? `${bpmnXml.length} chars` : 'null',
+    bpmnXmlActual: bpmnXml,
     activitiesCount: propActivities.length,
     transitionsCount: propTransitions.length,
     propActivities,
@@ -181,6 +365,19 @@ const BPMNEditor = ({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // Force cleanup any existing modeler
+    if (bpmnModelerRef.current) {
+      try {
+        bpmnModelerRef.current.destroy();
+        bpmnModelerRef.current = null;
+      } catch (e) {
+        console.warn('Error destroying old modeler:', e);
+      }
+    }
+
+    // Clear container content to ensure clean state
+    containerRef.current.innerHTML = '';
+
     const bpmnModeler = new BpmnJS({
       container: containerRef.current
     });
@@ -190,26 +387,36 @@ const BPMNEditor = ({
     // Wait for modeler to be fully initialized
     const initializeModeler = async () => {
       try {
-        await new Promise(resolve => setTimeout(resolve, 100)); // Short delay
+        setLoading(true);
+        setError(null);
+        
+        // Longer delay to ensure DOM is ready
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Check if component is still mounted and modeler exists
+        if (!bpmnModelerRef.current || !containerRef.current) {
+          console.log('🚫 Component unmounted or modeler destroyed, skipping initialization');
+          return;
+        }
         
         let xmlToLoad = null;
         
+        // TEMPORARY FIX: Always generate from activities for workflow 3 to avoid corrupted XML
+        if (workflowId === 3 && activities.length > 0) {
+          console.log('🔧 Force generating from activities for workflow 3 (bypassing saved XML)...');
+          xmlToLoad = buildBpmnFromActivities(workflowId, activities, transitions);
+          console.log('✅ Generated BPMN XML (length:', xmlToLoad.length, ')');
+        }
         // Priority 1: Use saved BPMN XML if it exists and is valid
-        if (bpmnXml && isValidBpmnXml(bpmnXml)) {
+        else if (bpmnXml && bpmnXml !== 'null' && isValidBpmnXml(bpmnXml)) {
           console.log('✅ Using saved BPMN XML (length:', bpmnXml.length, ')');
           xmlToLoad = bpmnXml;
         } 
         // Priority 2: Generate from activities and transitions if no saved XML
         else if (activities.length > 0) {
           console.log('🔧 No valid saved BPMN XML, generating from activities/transitions...');
-          console.log('📊 Activities data:', activities);
-          console.log('🔄 Transitions data:', transitions);
-          
           xmlToLoad = buildBpmnFromActivities(workflowId, activities, transitions);
           console.log('✅ Generated BPMN XML (length:', xmlToLoad.length, ')');
-          
-          // Save generated XML to see structure
-          console.log('🔍 Full Generated XML:', xmlToLoad);
         } 
         // Priority 3: Create empty diagram
         else {
@@ -221,11 +428,11 @@ const BPMNEditor = ({
         
         if (xmlToLoad) {
           console.log('🚀 Loading BPMN XML into modeler...');
-          console.log('📄 XML Preview:', xmlToLoad.substring(0, 200) + '...');
           
-          // Additional validation
-          if (!isValidBpmnXml(xmlToLoad)) {
-            throw new Error('Generated/provided XML is not valid BPMN format');
+          // Check if modeler still exists before importing
+          if (!bpmnModelerRef.current) {
+            console.log('🚫 Modeler destroyed before import, skipping');
+            return;
           }
           
           await bpmnModeler.importXML(xmlToLoad);
@@ -234,45 +441,39 @@ const BPMNEditor = ({
           // Auto-fit viewport with error handling
           setTimeout(() => {
             try {
-              const canvas = bpmnModeler.get('canvas');
-              const viewbox = canvas.viewbox();
-              if (viewbox.inner && viewbox.inner.width > 0 && viewbox.inner.height > 0) {
+              if (bpmnModelerRef.current) {
+                const canvas = bpmnModeler.get('canvas');
                 canvas.zoom('fit-viewport');
-              } else {
-                console.log('Skipping auto-fit: invalid viewbox dimensions');
               }
             } catch (e) {
               console.warn('Could not auto-fit viewport:', e.message);
             }
-          }, 200);
+          }, 300);
         }
 
         // Setup auto-save if not read-only
-        if (!isReadOnly && onSave) {
-          const eventBus = bpmnModeler.get('eventBus');
-          eventBus.on(['commandStack.changed'], debounce(async () => {
-            try {
-              const { xml } = await bpmnModeler.saveXML({ format: true });
-              debouncedSave(xml);
-            } catch (error) {
-              console.error('Error getting XML for auto-save:', error);
-            }
-          }, 1000));
+        if (!isReadOnly && onSave && bpmnModelerRef.current) {
+          try {
+            const eventBus = bpmnModeler.get('eventBus');
+            eventBus.on(['commandStack.changed'], debounce(async () => {
+              try {
+                if (bpmnModelerRef.current) {
+                  const { xml } = await bpmnModeler.saveXML({ format: true });
+                  debouncedSave(xml);
+                }
+              } catch (error) {
+                console.error('Error getting XML for auto-save:', error);
+              }
+            }, 1000));
+          } catch (e) {
+            console.warn('Could not setup auto-save:', e);
+          }
         }
 
         setLoading(false);
       } catch (error) {
         console.error('❌ Critical error in initializeModeler:', error);
-        
-        // Last resort: create empty diagram
-        try {
-          await bpmnModeler.createDiagram();
-          setError('Tạo sơ đồ trống do lỗi load dữ liệu: ' + error.message);
-          console.log('✅ Created empty diagram as final fallback');
-        } catch (finalError) {
-          setError('Không thể khởi tạo BPMN Editor: ' + finalError.message);
-        }
-        
+        setError('Không thể khởi tạo BPMN Editor: ' + error.message);
         setLoading(false);
       }
     };
@@ -281,7 +482,13 @@ const BPMNEditor = ({
 
     return () => {
       if (bpmnModelerRef.current) {
-        bpmnModelerRef.current.destroy();
+        try {
+          console.log('🧹 Cleaning up BPMN Editor');
+          bpmnModelerRef.current.destroy();
+          bpmnModelerRef.current = null;
+        } catch (error) {
+          console.warn('Error during cleanup:', error);
+        }
       }
     };
   }, [workflowId, isReadOnly, bpmnXml, activities, transitions]);
