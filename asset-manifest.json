@@ -1,7 +1,7 @@
 {
   "files": {
     "main.css": "/workflow-project/static/css/main.d4273fad.css",
-    "main.js": "/workflow-project/static/js/main.19791634.js",
+    "main.js": "/workflow-project/static/js/main.3b6f2d26.js",
     "static/js/443.b366cd7d.chunk.js": "/workflow-project/static/js/443.b366cd7d.chunk.js",
     "static/js/610.a001c05d.chunk.js": "/workflow-project/static/js/610.a001c05d.chunk.js",
     "static/js/222.8a7f1584.chunk.js": "/workflow-project/static/js/222.8a7f1584.chunk.js",
@@ -15,7 +15,7 @@
     "static/media/bpmn.woff2?21877404": "/workflow-project/static/media/bpmn.9c989372615cb2cfbaa6.woff2",
     "index.html": "/workflow-project/index.html",
     "main.d4273fad.css.map": "/workflow-project/static/css/main.d4273fad.css.map",
-    "main.19791634.js.map": "/workflow-project/static/js/main.19791634.js.map",
+    "main.3b6f2d26.js.map": "/workflow-project/static/js/main.3b6f2d26.js.map",
     "443.b366cd7d.chunk.js.map": "/workflow-project/static/js/443.b366cd7d.chunk.js.map",
     "610.a001c05d.chunk.js.map": "/workflow-project/static/js/610.a001c05d.chunk.js.map",
     "222.8a7f1584.chunk.js.map": "/workflow-project/static/js/222.8a7f1584.chunk.js.map",
@@ -25,6 +25,6 @@
   },
   "entrypoints": [
     "static/css/main.d4273fad.css",
-    "static/js/main.19791634.js"
+    "static/js/main.3b6f2d26.js"
   ]
 }
