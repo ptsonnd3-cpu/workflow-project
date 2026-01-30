@@ -2504,7 +2504,7 @@ if (STATIC_DIR) {
   });
 } else {
   // Nếu chưa build FE, trả lời hướng dẫn
-  app.get('*', (req, res) => {
+  app.get('/*', (req, res) => {
     res.status(200).send(
       'Frontend build not found. Run "npm run build" in frontend, or start the frontend dev server at http://localhost:3000.'
     );
