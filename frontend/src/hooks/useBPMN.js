@@ -43,6 +43,14 @@ const safeBpmnZoom = (canvas, zoomType = 'fit-viewport', fallbackZoom = 1.0) => 
 };
 
 function buildBpmnXml(workflow, activities, transitions) {
+  console.log('🔧 buildBpmnXml called:', {
+    workflow: workflow ? workflow.name : 'null',
+    activitiesCount: activities ? activities.length : 0,
+    transitionsCount: transitions ? transitions.length : 0,
+    activities: activities,
+    transitions: transitions
+  });
+  
   if (!workflow) return '';
 
   const startId = 'StartEvent_1';
@@ -92,79 +100,113 @@ function buildBpmnXml(workflow, activities, transitions) {
   const lastActivityKey = activities.length > 0 ? `Activity_${activities[activities.length - 1].id}` : null;
   const endPos = lastActivityKey ? { x: positions[lastActivityKey].x + 160, y } : { x: 260, y };
 
-  const tasksXml = activities.map((a) => `<userTask id="Activity_${a.id}" name="${a.name}" />`).join('\n    ');
+  const tasksXml = activities.map((a) => {
+    const id = `Activity_${a.id}`;
+    const name = a.name || '';
+    
+    switch (a.type) {
+      case 'start':
+        return `<startEvent id="${id}" name="${name}" />`;
+      case 'end':
+        return `<endEvent id="${id}" name="${name}" />`;
+      case 'service':
+        return `<serviceTask id="${id}" name="${name}">
+      <extensionElements>
+        <wf:handler>${a.handler || ''}</wf:handler>
+      </extensionElements>
+    </serviceTask>`;
+      case 'parallelGateway':
+        return `<parallelGateway id="${id}" name="${name}" />`;
+      case 'exclusiveGateway':
+        return `<exclusiveGateway id="${id}" name="${name}" />`;
+      case 'role':
+        return `<userTask id="${id}" name="[role] ${name}">
+      <extensionElements>
+        <wf:type>role</wf:type>
+      </extensionElements>
+    </userTask>`;
+      case 'department':
+        return `<userTask id="${id}" name="[department] ${name}">
+      <extensionElements>
+        <wf:type>department</wf:type>
+      </extensionElements>
+    </userTask>`;
+      default: // user
+        return `<userTask id="${id}" name="${name}" />`;
+    }
+  }).join('\n    ');
 
   const sequenceFlows = [];
   const flowDiEdges = [];
 
-  if (activities.length > 0) {
-    const firstActivityId = activities[0].id;
-    const flowId = 'Flow_start';
-    sequenceFlows.push(`<sequenceFlow id="${flowId}" sourceRef="${startId}" targetRef="Activity_${firstActivityId}" />`);
-    const target = positions[`Activity_${firstActivityId}`];
-    flowDiEdges.push(
-      `<bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">
-        <di:waypoint x="${startPos.x + 36}" y="${startPos.y + 18}" />
-        <di:waypoint x="${target.x}" y="${target.y + 18}" />
-      </bpmndi:BPMNEdge>`
-    );
-  }
-
+  // Create flows based on transitions only, don't auto-create start/end flows
   transitions.forEach((t) => {
     const flowId = `Flow_${t.id}`;
+    const sourceRef = t.from_activity_id ? `Activity_${t.from_activity_id}` : startId;
+    const targetRef = t.to_activity_id ? `Activity_${t.to_activity_id}` : endId;
+    
     sequenceFlows.push(
-      `<sequenceFlow id="${flowId}" sourceRef="Activity_${t.from_activity_id}" targetRef="Activity_${t.to_activity_id}" />`
+      `<sequenceFlow id="${flowId}" sourceRef="${sourceRef}" targetRef="${targetRef}"${t.condition && t.condition !== 'Done' ? ` name="${t.condition}"` : ''} />`
     );
-    const source = positions[`Activity_${t.from_activity_id}`];
-    const target = positions[`Activity_${t.to_activity_id}`];
-    if (source && target) {
+    
+    // Calculate waypoints for visual flow
+    const sourcePos = t.from_activity_id ? positions[`Activity_${t.from_activity_id}`] : startPos;
+    const targetPos = t.to_activity_id ? positions[`Activity_${t.to_activity_id}`] : endPos;
+    
+    if (sourcePos && targetPos) {
+      // Get source activity to determine width for waypoint calculation
+      const sourceActivity = activities.find(a => a.id === t.from_activity_id);
+      let sourceWidth = sourceActivity && (sourceActivity.type === 'parallelGateway' || sourceActivity.type === 'exclusiveGateway') ? 50 : 100;
+      if (!sourceActivity) sourceWidth = 36; // start event
+      
       flowDiEdges.push(
         `<bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">
-        <di:waypoint x="${source.x + 100}" y="${source.y + 18}" />
-        <di:waypoint x="${target.x}" y="${target.y + 18}" />
+        <di:waypoint x="${sourcePos.x + sourceWidth/2}" y="${sourcePos.y + 40}" />
+        <di:waypoint x="${targetPos.x + 50}" y="${targetPos.y + 40}" />
       </bpmndi:BPMNEdge>`
       );
     }
   });
 
-  if (lastActivityKey) {
-    const flowId = 'Flow_to_end';
-    sequenceFlows.push(`<sequenceFlow id="${flowId}" sourceRef="${lastActivityKey}" targetRef="${endId}" />`);
-    const source = positions[lastActivityKey];
-    flowDiEdges.push(
-      `<bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">
-        <di:waypoint x="${source.x + 100}" y="${source.y + 18}" />
-        <di:waypoint x="${endPos.x}" y="${endPos.y + 18}" />
-      </bpmndi:BPMNEdge>`
-    );
-  }
-
   const shapes = [
-    `<bpmndi:BPMNShape id="${startId}_di" bpmnElement="${startId}">
+    ...(hasStart ? [] : [`<bpmndi:BPMNShape id="${startId}_di" bpmnElement="${startId}">
       <dc:Bounds x="${startPos.x}" y="${startPos.y}" width="36" height="36" />
-    </bpmndi:BPMNShape>`,
+    </bpmndi:BPMNShape>`]),
     ...activities.map((a) => {
       const p = positions[`Activity_${a.id}`];
+      // Different sizes for different element types
+      let width = 100, height = 80; // Default for tasks
+      if (a.type === 'start' || a.type === 'end') {
+        width = height = 36;
+      } else if (a.type === 'parallelGateway' || a.type === 'exclusiveGateway') {
+        width = height = 50;
+      }
+      
       return `<bpmndi:BPMNShape id="Activity_${a.id}_di" bpmnElement="Activity_${a.id}">
-      <dc:Bounds x="${p.x}" y="${p.y}" width="100" height="36" />
+      <dc:Bounds x="${p.x}" y="${p.y}" width="${width}" height="${height}" />
     </bpmndi:BPMNShape>`;
     }),
-    `<bpmndi:BPMNShape id="${endId}_di" bpmnElement="${endId}">
+    ...(hasEnd ? [] : [`<bpmndi:BPMNShape id="${endId}_di" bpmnElement="${endId}">
       <dc:Bounds x="${endPos.x}" y="${endPos.y}" width="36" height="36" />
-    </bpmndi:BPMNShape>`
+    </bpmndi:BPMNShape>`])
   ];
+
+  // Check if start/end events are already in activities
+  const hasStart = activities.some(a => a.type === 'start');
+  const hasEnd = activities.some(a => a.type === 'end');
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+             xmlns:wf="http://workflow.local/schema"
              id="Definitions_${workflow.id}"
              targetNamespace="http://bpmn.io/schema/bpmn">
   <process id="Process_${workflow.id}" isExecutable="true">
-    <startEvent id="${startId}" name="Bắt đầu" />
+    ${!hasStart ? `<startEvent id="${startId}" name="Bắt đầu" />` : ''}
     ${tasksXml}
-    <endEvent id="${endId}" name="Kết thúc" />
+    ${!hasEnd ? `<endEvent id="${endId}" name="Kết thúc" />` : ''}
     ${sequenceFlows.join('\n    ')}
   </process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_${workflow.id}">

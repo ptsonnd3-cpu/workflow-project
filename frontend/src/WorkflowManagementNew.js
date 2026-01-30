@@ -395,6 +395,8 @@ function WorkflowManagement({ onBack }) {
                 <Suspense fallback={<BPMNEditorSkeleton />}>
                   <BPMNEditor
                     bpmnXml={workflowDetail?.bpmn_xml}
+                    activities={activities}
+                    transitions={transitions}
                     onSave={async (workflowId, xml) => {
                       // Save BPMN XML logic here
                       const response = await fetch(`/api/workflows/${workflowId}/save-bpmn-xml`, {

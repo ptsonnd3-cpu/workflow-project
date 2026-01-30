@@ -14,7 +14,7 @@ export const WorkflowListSkeleton = ({ count = 5 }) => (
         </div>
       </div>
     ))}
-    <style jsx>{`
+    <style jsx={true}>{`
       .skeleton-container {
         padding: 20px;
       }
@@ -97,7 +97,7 @@ export const WorkflowDetailSkeleton = () => (
       </div>
     </div>
     
-    <style jsx>{`
+    <style jsx={true}>{`
       .workflow-detail-skeleton {
         padding: 20px;
         max-width: 1200px;
@@ -203,7 +203,7 @@ export const BPMNEditorSkeleton = () => (
       </div>
     </div>
     
-    <style jsx>{`
+    <style jsx={true}>{`
       .bpmn-editor-skeleton {
         width: 100%;
         margin: 20px 0;

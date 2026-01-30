@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
 });
 
 async function seedDatabase() {
@@ -158,7 +158,30 @@ async function seedDatabase() {
       )
     `);
     
+    // Domain logging table  
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS DomainLog (
+          id SERIAL PRIMARY KEY,
+          workflow_instance_id INTEGER REFERENCES WorkflowInstance(id) ON DELETE CASCADE,
+          activity_definition_id INTEGER REFERENCES ActivityDefinition(id) ON DELETE CASCADE,
+          action VARCHAR(255) NOT NULL,
+          metadata_json TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
     console.log('✅ All tables created successfully');
+    
+    // ===== CREATE INDEXES =====
+    console.log('\n📊 Creating performance indexes...');
+    
+    // DomainLog indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_domainlog_workflow ON DomainLog(workflow_instance_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_domainlog_activity ON DomainLog(activity_definition_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_domainlog_action ON DomainLog(action)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_domainlog_created ON DomainLog(created_at)`);
+    
+    console.log('✅ All indexes created successfully');
     
     // ===== INSERT ALL DATA =====
     console.log('\n📝 Inserting all seed data...');

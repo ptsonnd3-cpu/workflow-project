@@ -1,43 +1,170 @@
 import React, { useState, useRef, useEffect } from 'react';
 import BpmnJS from 'bpmn-js/dist/bpmn-modeler.development.js';
 import { debounce } from '../utils';
+import { apiGet } from '../services/apiClient';
 
-// Helper function to create a basic BPMN diagram if missing
-const createBasicBPMNDiagram = () => {
+// Validate BPMN XML structure
+const isValidBpmnXml = (xml) => {
+  if (!xml || typeof xml !== 'string' || xml.trim().length === 0) {
+    return false;
+  }
+  
+  try {
+    // Basic checks
+    const trimmed = xml.trim();
+    return trimmed.includes('<bpmn:definitions') && 
+           trimmed.includes('</bpmn:definitions>') &&
+           trimmed.includes('xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"');
+  } catch (e) {
+    return false;
+  }
+};
+
+// Helper function to build BPMN XML from activities and transitions
+const buildBpmnFromActivities = (workflowId, activities = [], transitions = []) => {
+  console.log('🔧 buildBpmnFromActivities called:', {
+    workflowId,
+    activitiesCount: activities.length,
+    transitionsCount: transitions.length,
+    activities,
+    transitions
+  });
+
+  const positions = {};
+  const y = 150;
+  let x = 200;
+
+  activities.forEach((a, idx) => {
+    positions[`Activity_${a.id}`] = { x: x + idx * 160, y };
+  });
+
+  const tasksXml = activities.map((a) => {
+    const id = `Activity_${a.id}`;
+    const name = a.name || '';
+    
+    switch (a.type) {
+      case 'start':
+        return `    <bpmn:startEvent id="${id}" name="${name}" />`;
+      case 'end':
+        return `    <bpmn:endEvent id="${id}" name="${name}" />`;
+      case 'service':
+        return `    <bpmn:serviceTask id="${id}" name="${name}">
+      <bpmn:extensionElements>
+        <wf:handler>${a.handler || ''}</wf:handler>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+      case 'parallelGateway':
+        return `    <bpmn:parallelGateway id="${id}" name="${name}" />`;
+      case 'exclusiveGateway':
+        return `    <bpmn:exclusiveGateway id="${id}" name="${name}" />`;
+      case 'role':
+        return `    <bpmn:userTask id="${id}" name="[role] ${name}">
+      <bpmn:extensionElements>
+        <wf:type>role</wf:type>
+      </bpmn:extensionElements>
+    </bpmn:userTask>`;
+      case 'department':
+        return `    <bpmn:userTask id="${id}" name="[department] ${name}">
+      <bpmn:extensionElements>
+        <wf:type>department</wf:type>
+      </bpmn:extensionElements>
+    </bpmn:userTask>`;
+      default: // user
+        return `    <bpmn:userTask id="${id}" name="${name}" />`;
+    }
+  }).join('\n');
+
+  const sequenceFlows = transitions.map((t) => {
+    const flowId = `Flow_${t.id}`;
+    const sourceRef = `Activity_${t.from_activity_id}`;
+    const targetRef = `Activity_${t.to_activity_id}`;
+    const conditionName = t.condition && t.condition !== 'Done' ? ` name="${t.condition}"` : '';
+    
+    return `    <bpmn:sequenceFlow id="${flowId}" sourceRef="${sourceRef}" targetRef="${targetRef}"${conditionName} />`;
+  }).join('\n');
+
+  const flowDiEdges = transitions.map((t) => {
+    const flowId = `Flow_${t.id}`;
+    const sourcePos = positions[`Activity_${t.from_activity_id}`];
+    const targetPos = positions[`Activity_${t.to_activity_id}`];
+    
+    if (sourcePos && targetPos) {
+      const sourceActivity = activities.find(a => a.id === t.from_activity_id);
+      let sourceWidth = 100;
+      if (sourceActivity && (sourceActivity.type === 'parallelGateway' || sourceActivity.type === 'exclusiveGateway')) {
+        sourceWidth = 50;
+      } else if (sourceActivity && (sourceActivity.type === 'start' || sourceActivity.type === 'end')) {
+        sourceWidth = 36;
+      }
+
+      return `      <bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">
+        <di:waypoint x="${sourcePos.x + sourceWidth/2}" y="${sourcePos.y + 40}" />
+        <di:waypoint x="${targetPos.x + 50}" y="${targetPos.y + 40}" />
+      </bpmndi:BPMNEdge>`;
+    }
+    return '';
+  }).filter(Boolean).join('\n');
+
+  const shapes = activities.map((a) => {
+    const p = positions[`Activity_${a.id}`];
+    let width = 100, height = 80;
+    if (a.type === 'start' || a.type === 'end') {
+      width = height = 36;
+    } else if (a.type === 'parallelGateway' || a.type === 'exclusiveGateway') {
+      width = height = 50;
+    }
+    
+    return `      <bpmndi:BPMNShape id="Activity_${a.id}_di" bpmnElement="Activity_${a.id}">
+        <dc:Bounds x="${p.x}" y="${p.y}" width="${width}" height="${height}" />
+      </bpmndi:BPMNShape>`;
+  }).join('\n');
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" 
-                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" 
-                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" 
-                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI" 
-                  id="Definitions_1" 
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:wf="http://workflow.local/schema"
+                  id="Definitions_${workflowId}"
                   targetNamespace="http://bpmn.io/schema/bpmn">
-  <bpmn:process id="Process_1" isExecutable="true">
-    <bpmn:startEvent id="StartEvent_1" />
-    <bpmn:endEvent id="EndEvent_1" />
-    <bpmn:sequenceFlow id="SequenceFlow_1" sourceRef="StartEvent_1" targetRef="EndEvent_1" />
+  <bpmn:process id="Process_${workflowId}" isExecutable="true">
+${tasksXml}
+${sequenceFlows}
   </bpmn:process>
-  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
-    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1">
-      <bpmndi:BPMNShape id="_BPMNShape_StartEvent_2" bpmnElement="StartEvent_1">
-        <dc:Bounds x="179" y="79" width="36" height="36" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="EndEvent_1_di" bpmnElement="EndEvent_1">
-        <dc:Bounds x="279" y="79" width="36" height="36" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="SequenceFlow_1_di" bpmnElement="SequenceFlow_1">
-        <di:waypoint x="215" y="97" />
-        <di:waypoint x="279" y="97" />
-      </bpmndi:BPMNEdge>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_${workflowId}">
+    <bpmndi:BPMNPlane id="BPMNPlane_${workflowId}" bpmnElement="Process_${workflowId}">
+${shapes}
+${flowDiEdges}
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`;
 };
 
-const BPMNEditor = ({ bpmnXml, onSave, workflowId, isReadOnly = false }) => {
+const BPMNEditor = ({ 
+  bpmnXml, 
+  onSave, 
+  workflowId, 
+  activities: propActivities = [], 
+  transitions: propTransitions = [], 
+  isReadOnly = false 
+}) => {
+  console.log('🔍 BPMNEditor received props:', {
+    workflowId,
+    bpmnXml: bpmnXml ? `${bpmnXml.length} chars` : 'null',
+    activitiesCount: propActivities.length,
+    transitionsCount: propTransitions.length,
+    propActivities,
+    propTransitions
+  });
+  
   const containerRef = useRef();
   const bpmnModelerRef = useRef();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  
+  // Use props data instead of state
+  const activities = propActivities;
+  const transitions = propTransitions;
 
   // Debounced save function
   const debouncedSave = debounce(async (xml) => {
@@ -55,109 +182,69 @@ const BPMNEditor = ({ bpmnXml, onSave, workflowId, isReadOnly = false }) => {
     if (!containerRef.current) return;
 
     const bpmnModeler = new BpmnJS({
-      container: containerRef.current,
-      keyboard: {
-        bindTo: window
-      }
+      container: containerRef.current
     });
 
     bpmnModelerRef.current = bpmnModeler;
 
-    // Load initial BPMN
-    const loadBpmn = async () => {
+    // Wait for modeler to be fully initialized
+    const initializeModeler = async () => {
       try {
-        setLoading(true);
-        setError(null);
+        await new Promise(resolve => setTimeout(resolve, 100)); // Short delay
         
-        if (bpmnXml && bpmnXml.trim()) {
-          console.log('Loading BPMN XML:', bpmnXml.substring(0, 200) + '...');
+        let xmlToLoad = null;
+        
+        // Priority 1: Use saved BPMN XML if it exists and is valid
+        if (bpmnXml && isValidBpmnXml(bpmnXml)) {
+          console.log('✅ Using saved BPMN XML (length:', bpmnXml.length, ')');
+          xmlToLoad = bpmnXml;
+        } 
+        // Priority 2: Generate from activities and transitions if no saved XML
+        else if (activities.length > 0) {
+          console.log('🔧 No valid saved BPMN XML, generating from activities/transitions...');
+          console.log('📊 Activities data:', activities);
+          console.log('🔄 Transitions data:', transitions);
           
-          try {
-            // Try to import the XML as-is first
-            const result = await bpmnModeler.importXML(bpmnXml);
-            
-            // Check if there are warnings but diagram loaded
-            if (result.warnings && result.warnings.length > 0) {
-              console.warn('BPMN import warnings:', result.warnings);
-              // Don't treat warnings as errors - diagram can still be displayed
-            }
-            
-            console.log('BPMN loaded successfully');
-          } catch (importError) {
-            console.error('BPMN import error:', importError);
-            
-            // Special handling for "no diagram to display" error
-            if (importError.message.includes('no diagram to display')) {
-              console.log('No diagram found, attempting to create diagram from process definition');
-              
-              // Try to check if there's process definition but no diagram
-              try {
-                // Parse XML to check structure
-                const parser = new DOMParser();
-                const xmlDoc = parser.parseFromString(bpmnXml, 'text/xml');
-                const processes = xmlDoc.getElementsByTagNameNS('*', 'process');
-                const diagrams = xmlDoc.getElementsByTagNameNS('*', 'BPMNDiagram');
-                
-                if (processes.length > 0 && diagrams.length === 0) {
-                  console.log('Found process definitions but no diagrams. Creating new diagram...');
-                  // Create a new diagram and then try to preserve process elements
-                  await bpmnModeler.createDiagram();
-                  
-                  // Try to import original XML again to get process definitions
-                  try {
-                    const modeling = bpmnModeler.get('modeling');
-                    const elementRegistry = bpmnModeler.get('elementRegistry');
-                    const canvas = bpmnModeler.get('canvas');
-                    
-                    // Get the root element (process)
-                    const rootElement = canvas.getRootElement();
-                    
-                    if (rootElement) {
-                      setError('Tạo lại diagram cho dữ liệu BPMN cũ. Sơ đồ hiển thị có thể không đầy đủ.');
-                      console.log('Successfully created diagram with process definition');
-                    }
-                  } catch (diagramError) {
-                    console.error('Error creating diagram:', diagramError);
-                    setError('Không thể tạo diagram từ dữ liệu BPMN cũ: ' + diagramError.message);
-                  }
-                } else {
-                  // No process definitions found
-                  setError('Dữ liệu BPMN không chứa định nghĩa quy trình hợp lệ.');
-                }
-              } catch (parseError) {
-                console.error('Error parsing BPMN XML:', parseError);
-                setError('Không thể phân tích cú pháp BPMN XML.');
-              }
-            } else {
-              // Try other fixes
-              let fixedXml = bpmnXml;
-              
-              // Fix missing namespace declarations
-              if (!bpmnXml.includes('xmlns:bpmn')) {
-                fixedXml = bpmnXml.replace('<definitions', 
-                  '<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"');
-              }
-              
-              // Try with fixed XML
-              if (fixedXml !== bpmnXml) {
-                try {
-                  await bpmnModeler.importXML(fixedXml);
-                  console.log('BPMN loaded with namespace fix');
-                } catch (secondError) {
-                  // If still fails, show error but don't create new diagram immediately
-                  setError(`Không thể tải sơ đồ BPMN: ${importError.message}. Sơ đồ có thể bị hỏng.`);
-                  console.error('Second import attempt failed:', secondError);
-                }
-              } else {
-                // Show error but don't create new diagram
-                setError(`Lỗi khi tải BPMN: ${importError.message}. Dữ liệu có thể không tương thích.`);
-              }
-            }
-          }
-        } else {
-          // Only create new diagram if no XML data at all
-          console.log('No BPMN XML provided, creating new diagram');
+          xmlToLoad = buildBpmnFromActivities(workflowId, activities, transitions);
+          console.log('✅ Generated BPMN XML (length:', xmlToLoad.length, ')');
+          
+          // Save generated XML to see structure
+          console.log('🔍 Full Generated XML:', xmlToLoad);
+        } 
+        // Priority 3: Create empty diagram
+        else {
+          console.log('📝 No data available, creating empty diagram');
           await bpmnModeler.createDiagram();
+          setLoading(false);
+          return;
+        }
+        
+        if (xmlToLoad) {
+          console.log('🚀 Loading BPMN XML into modeler...');
+          console.log('📄 XML Preview:', xmlToLoad.substring(0, 200) + '...');
+          
+          // Additional validation
+          if (!isValidBpmnXml(xmlToLoad)) {
+            throw new Error('Generated/provided XML is not valid BPMN format');
+          }
+          
+          await bpmnModeler.importXML(xmlToLoad);
+          console.log('✅ BPMN loaded successfully');
+          
+          // Auto-fit viewport with error handling
+          setTimeout(() => {
+            try {
+              const canvas = bpmnModeler.get('canvas');
+              const viewbox = canvas.viewbox();
+              if (viewbox.inner && viewbox.inner.width > 0 && viewbox.inner.height > 0) {
+                canvas.zoom('fit-viewport');
+              } else {
+                console.log('Skipping auto-fit: invalid viewbox dimensions');
+              }
+            } catch (e) {
+              console.warn('Could not auto-fit viewport:', e.message);
+            }
+          }, 200);
         }
 
         // Setup auto-save if not read-only
@@ -175,46 +262,29 @@ const BPMNEditor = ({ bpmnXml, onSave, workflowId, isReadOnly = false }) => {
 
         setLoading(false);
       } catch (error) {
-        console.error('Critical error in loadBpmn:', error);
-        setError('Lỗi nghiêm trọng khi khởi tạo BPMN Editor: ' + error.message);
+        console.error('❌ Critical error in initializeModeler:', error);
+        
+        // Last resort: create empty diagram
+        try {
+          await bpmnModeler.createDiagram();
+          setError('Tạo sơ đồ trống do lỗi load dữ liệu: ' + error.message);
+          console.log('✅ Created empty diagram as final fallback');
+        } catch (finalError) {
+          setError('Không thể khởi tạo BPMN Editor: ' + finalError.message);
+        }
+        
         setLoading(false);
       }
     };
 
-    loadBpmn();
+    initializeModeler();
 
     return () => {
       if (bpmnModelerRef.current) {
         bpmnModelerRef.current.destroy();
       }
     };
-  }, [workflowId, isReadOnly]);
-
-  // Update BPMN when prop changes
-  useEffect(() => {
-    if (bpmnModelerRef.current && bpmnXml && bpmnXml.trim() && !loading) {
-      console.log('Updating BPMN with new XML');
-      
-      bpmnModelerRef.current.importXML(bpmnXml).then((result) => {
-        if (result.warnings && result.warnings.length > 0) {
-          console.warn('BPMN update warnings:', result.warnings);
-          // Don't show warnings as errors to user
-        }
-        setError(null); // Clear any previous errors on successful load
-      }).catch(error => {
-        console.error('Error importing updated BPMN:', error);
-        
-        // Don't immediately show error - try to keep existing diagram
-        // Only show error if it's critical
-        if (error.message.includes('no parser')) {
-          setError('Định dạng BPMN không được hỗ trợ.');
-        } else {
-          console.warn('BPMN update failed but keeping existing diagram:', error.message);
-          // Don't update error state - keep existing diagram visible
-        }
-      });
-    }
-  }, [bpmnXml, loading]);
+  }, [workflowId, isReadOnly, bpmnXml, activities, transitions]);
 
   const handleManualSave = async () => {
     if (!bpmnModelerRef.current || !onSave || !workflowId || isReadOnly) return;

@@ -5,9 +5,7 @@ const { Pool } = require('pg');
 const dbConfig = process.env.DATABASE_URL 
   ? {
       connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false // Required for Render.com and most cloud providers
-      }
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
     }
   : {
       user: process.env.DB_USER || 'postgres',
