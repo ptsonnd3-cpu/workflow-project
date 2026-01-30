@@ -1,9 +1,12 @@
+// Load environment variables
+require('dotenv').config();
+
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
+const { db, testConnection } = require('./database');
 const { XMLParser } = require('fast-xml-parser');
 const expressValidator = require('express-validator');
 const { body, param } = expressValidator;
@@ -87,294 +90,61 @@ const fixBPMNDiagram = (bpmnXml, workflowName) => {
   return createBPMNWithDiagram(workflowName);
 };
 
-// --- DB INIT (SQLite file) ---
-const dbPath = path.join(__dirname, 'workflow.db');
-const db = new sqlite3.Database(dbPath);
+// --- DB INIT (PostgreSQL) ---
+// Test database connection on startup
+testConnection();
 
-// Tạo bảng nếu chưa có + seed dữ liệu mẫu bạn gửi
-db.serialize(() => {
-  // Workflow definition
-  db.run(`CREATE TABLE IF NOT EXISTS WorkflowDefinition (
-    id INTEGER PRIMARY KEY,
-    name TEXT,
-    version INTEGER,
-    description TEXT,
-    bpmn_xml TEXT,
-    created_at TEXT,
-    updated_at TEXT
-  )`);
+// Initialize PostgreSQL tables automatically on startup
+const initializeDatabase = async () => {
+  try {
+    console.log('🔄 Initializing PostgreSQL tables...');
+    const migrationSQL = fs.readFileSync(path.join(__dirname, 'migration.sql'), 'utf8');
+    await db.query(migrationSQL);
+    console.log('✅ PostgreSQL tables initialized successfully');
+  } catch (error) {
+    console.error('❌ Failed to initialize database:', error.message);
+    console.log('💡 Make sure to run the migration.sql file manually if needed');
+  }
+};
 
-  // Performance indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_workflow_name ON WorkflowDefinition(name)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_workflow_version ON WorkflowDefinition(version)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_workflow_created ON WorkflowDefinition(created_at)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS ActivityDefinition (
-    id INTEGER PRIMARY KEY,
-    workflow_definition_id INTEGER,
-    name TEXT,
-    type TEXT,
-    handler TEXT
-  )`);
-
-  // Activity indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_activity_workflow ON ActivityDefinition(workflow_definition_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_activity_type ON ActivityDefinition(type)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_activity_handler ON ActivityDefinition(handler)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS TransitionDefinition (
-    id INTEGER PRIMARY KEY,
-    from_activity_id INTEGER,
-    to_activity_id INTEGER,
-    condition TEXT,
-    priority INTEGER,
-    is_default INTEGER
-  )`);
-
-  // Transition indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_from ON TransitionDefinition(from_activity_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_to ON TransitionDefinition(to_activity_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_priority ON TransitionDefinition(priority)`);
-
-  // Org structure
-  db.run(`CREATE TABLE IF NOT EXISTS "Group" (
-    id INTEGER PRIMARY KEY,
-    name TEXT,
-    start_date TEXT,
-    end_date TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS GroupMember (
-    id INTEGER PRIMARY KEY,
-    group_id INTEGER,
-    user_id INTEGER
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS Role (
-    id INTEGER PRIMARY KEY,
-    name TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS Department (
-    id INTEGER PRIMARY KEY,
-    name TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS User (
-    id INTEGER PRIMARY KEY,
-    name TEXT,
-    department_id INTEGER,
-    role_id INTEGER
-  )`);
-
-  // Runtime
-  db.run(`CREATE TABLE IF NOT EXISTS WorkflowInstance (
-    id INTEGER PRIMARY KEY,
-    workflow_definition_id INTEGER,
-    business_id INTEGER,
-    state TEXT,
-    started_at TEXT,
-    context_json TEXT
-  )`);
-
-  // Workflow instance indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_wf_instance_def ON WorkflowInstance(workflow_definition_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_wf_instance_state ON WorkflowInstance(state)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_wf_instance_started ON WorkflowInstance(started_at)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_wf_instance_business ON WorkflowInstance(business_id)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS ActivityInstance (
-    id INTEGER PRIMARY KEY,
-    workflow_instance_id INTEGER,
-    activity_definition_id INTEGER,
-    status TEXT,
-    created_at TEXT
-  )`);
-
-  // Activity instance indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_act_instance_wf ON ActivityInstance(workflow_instance_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_act_instance_def ON ActivityInstance(activity_definition_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_act_instance_status ON ActivityInstance(status)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_act_instance_created ON ActivityInstance(created_at)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS TaskAssignee (
-    id INTEGER PRIMARY KEY,
-    activity_instance_id INTEGER,
-    assignment_type TEXT,
-    group_id INTEGER,
-    user_id INTEGER,
-    role_id INTEGER,
-    department_id INTEGER,
-    is_completed INTEGER
-  )`);
-
-  // Task assignee indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_task_assignee_instance ON TaskAssignee(activity_instance_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_task_assignee_user ON TaskAssignee(user_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_task_assignee_completed ON TaskAssignee(is_completed)`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS TransitionLog (
-    id INTEGER PRIMARY KEY,
-    workflow_instance_id INTEGER,
-    from_activity_instance_id INTEGER,
-    to_activity_instance_id INTEGER,
-    condition TEXT,
-    acted_by_user_id INTEGER,
-    created_at TEXT
-  )`);
-
-  // Transition log indexes
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_log_wf ON TransitionLog(workflow_instance_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_log_from ON TransitionLog(from_activity_instance_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_log_created ON TransitionLog(created_at)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_transition_log_user ON TransitionLog(acted_by_user_id)`);
-
-  // Domain/Audit log
-  db.run(`CREATE TABLE IF NOT EXISTS DomainLog (
-    id INTEGER PRIMARY KEY,
-    workflow_instance_id INTEGER,
-    activity_definition_id INTEGER,
-    action TEXT,
-    metadata_json TEXT,
-    created_at TEXT
-  )`);
-
-  // Outbox để xử lý side-effects an toàn
-  db.run(`CREATE TABLE IF NOT EXISTS Outbox (
-    id INTEGER PRIMARY KEY,
-    event_type TEXT,
-    payload_json TEXT,
-    status TEXT,
-    error TEXT,
-    created_at TEXT,
-    processed_at TEXT
-  )`);
-
-  // Outbox indexes for performance
-  db.run(`CREATE INDEX IF NOT EXISTS idx_outbox_status ON Outbox(status)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_outbox_event_type ON Outbox(event_type)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_outbox_created ON Outbox(created_at)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_outbox_processed ON Outbox(processed_at)`);
-
-  // Composite index for common queries
-  db.run(`CREATE INDEX IF NOT EXISTS idx_outbox_status_created ON Outbox(status, created_at)`);
-
-  // Migration: thêm cột bpmn_xml, created_at, updated_at nếu DB cũ chưa có
-  db.all(`PRAGMA table_info(WorkflowDefinition)`, (err, cols) => {
-    if (err) return;
-    const colNames = (cols || []).map((c) => c && c.name).filter(Boolean);
-
-    if (!colNames.includes('bpmn_xml')) {
-      db.run(`ALTER TABLE WorkflowDefinition ADD COLUMN bpmn_xml TEXT`);
-    }
-    if (!colNames.includes('created_at')) {
-      db.run(`ALTER TABLE WorkflowDefinition ADD COLUMN created_at TEXT`);
-    }
-    if (!colNames.includes('updated_at')) {
-      db.run(`ALTER TABLE WorkflowDefinition ADD COLUMN updated_at TEXT`);
-    }
-  });
-
-  // Migration: thêm cột context_json cho WorkflowInstance nếu DB cũ chưa có
-  db.all(`PRAGMA table_info(WorkflowInstance)`, (err, cols) => {
-    if (err) return;
-    const colNames = (cols || []).map((c) => c && c.name).filter(Boolean);
-    if (!colNames.includes('context_json')) {
-      db.run(`ALTER TABLE WorkflowInstance ADD COLUMN context_json TEXT`);
-    }
-  });
-
-  // Migration: thêm cột handler cho ActivityDefinition
-  db.all(`PRAGMA table_info(ActivityDefinition)`, (err, cols) => {
-    if (err) return;
-    const colNames = (cols || []).map((c) => c && c.name).filter(Boolean);
-    if (!colNames.includes('handler')) {
-      db.run(`ALTER TABLE ActivityDefinition ADD COLUMN handler TEXT`);
-    }
-  });
-
-  // Migration: thêm cột priority, is_default cho TransitionDefinition
-  db.all(`PRAGMA table_info(TransitionDefinition)`, (err, cols) => {
-    if (err) return;
-    const colNames = (cols || []).map((c) => c && c.name).filter(Boolean);
-    if (!colNames.includes('priority')) {
-      db.run(`ALTER TABLE TransitionDefinition ADD COLUMN priority INTEGER`);
-    }
-    if (!colNames.includes('is_default')) {
-      db.run(`ALTER TABLE TransitionDefinition ADD COLUMN is_default INTEGER`);
-    }
-  });
-
-  // Seed tối thiểu: chỉ insert nếu chưa có record
-  db.get('SELECT COUNT(*) AS cnt FROM WorkflowDefinition', (err, row) => {
-    if (err) return console.error('DB init error', err);
-    if (row.cnt > 0) return; // đã seed
-
-    db.serialize(() => {
-      db.run(
-        `INSERT INTO WorkflowDefinition (id, name, version, description)
-         VALUES (1, 'Quy trình phê duyệt văn bản', 1, 'Soạn thảo -> Phân loại -> Phê duyệt -> Lưu trữ')`
-      );
-
-      db.run(
-        `INSERT INTO ActivityDefinition (id, workflow_definition_id, name, type) VALUES
-        (10, 1, 'Soạn thảo', 'user'),
-        (11, 1, 'Phân loại', 'department'),
-        (12, 1, 'Phê duyệt', 'role'),
-        (13, 1, 'Lưu trữ', 'department')`
-      );
-
-      db.run(
-        `INSERT INTO TransitionDefinition (id, from_activity_id, to_activity_id, condition) VALUES
-        (100, 10, 11, 'Done'),
-        (101, 11, 12, 'Done'),
-        (102, 12, 13, 'Approved'),
-        (103, 12, 10, 'Rejected')`
-      );
-
-      db.run(
-        `INSERT INTO "Group" (id, name, start_date, end_date)
-         VALUES (50, 'Nhóm dự án ERP', '2026-01-01', '2026-03-31')`
-      );
-
-      db.run(
-        `INSERT INTO GroupMember (id, group_id, user_id) VALUES
-        (1, 50, 101), (2, 50, 102), (3, 50, 103)`
-      );
-
-      db.run(`INSERT INTO Role (id, name) VALUES (1, 'Giám đốc'), (2, 'Trưởng phòng'), (3, 'Nhân viên')`);
-      db.run(`INSERT INTO Department (id, name) VALUES (10, 'Phòng Tài chính'), (20, 'Phòng Văn thư')`);
-
-      db.run(
-        `INSERT INTO User (id, name, department_id, role_id) VALUES
-        (101, 'Nguyễn A', 10, 3),
-        (102, 'Trần B', 20, 2),
-        (103, 'Lê C', 20, 1)`
-      );
-
-      db.run(
-        `INSERT INTO WorkflowInstance (id, workflow_definition_id, business_id, state, started_at)
-         VALUES (200, 1, 5000, 'Running', datetime('now'))`
-      );
-
-      db.run(
-        `INSERT INTO ActivityInstance (id, workflow_instance_id, activity_definition_id, status, created_at) VALUES
-        (300, 200, 10, 'Completed', datetime('now')),
-        (301, 200, 11, 'Completed', datetime('now')),
-        (302, 200, 12, 'Running', datetime('now'))`
-      );
-
-      db.run(
-        `INSERT INTO TaskAssignee (id, activity_instance_id, assignment_type, group_id, is_completed)
-         VALUES (400, 302, 'group', 50, 0)`
-      );
-    });
-  });
-});
-
+// Initialize database on startup
 // --- Helpers / Hooks ---
 const safeParseJson = (s) => {
   try { return s ? JSON.parse(s) : {}; } catch (_) { return {}; }
+};
+
+// Database query helpers - convert SQLite style to PostgreSQL
+const dbHelpers = {
+  // Get single row - equivalent to db.get
+  get: async (query, params = []) => {
+    const result = await db.query(query, params);
+    return result.rows[0] || null;
+  },
+  
+  // Get all rows - equivalent to db.all
+  all: async (query, params = []) => {
+    const result = await db.query(query, params);
+    return result.rows || [];
+  },
+  
+  // Run query - equivalent to db.run
+  run: async (query, params = []) => {
+    const result = await db.query(query, params);
+    return {
+      changes: result.rowCount,
+      lastID: result.rows?.[0]?.id || null
+    };
+  },
+  
+  // Run query and return inserted ID
+  runWithId: async (query, params = []) => {
+    // For INSERT queries, add RETURNING id
+    const queryWithReturn = query.includes('INSERT') && !query.includes('RETURNING') 
+      ? query + ' RETURNING id' 
+      : query;
+    const result = await db.query(queryWithReturn, params);
+    return result.rows?.[0]?.id || null;
+  }
 };
 const stringifyJson = (o) => {
   try { return JSON.stringify(o || {}); } catch (_) { return '{}'; }
@@ -549,10 +319,10 @@ const serviceHandlers = {
       await insertOutbox('NotifyERP', { instanceId: instance.id, businessId: instance.business_id, error: e.message || String(e) });
     }
     // cập nhật context đánh dấu đã đồng bộ
-    const row = await new Promise((resolve) => db.get('SELECT context_json FROM WorkflowInstance WHERE id = ?', [instance.id], (e, r) => resolve(r)));
+    const row = await dbHelpers.get('SELECT context_json FROM WorkflowInstance WHERE id = $1', [instance.id]);
     const ctx = safeParseJson(row && row.context_json);
     ctx.erpSynced = true;
-    await new Promise((resolve) => db.run('UPDATE WorkflowInstance SET context_json = ? WHERE id = ?', [stringifyJson(ctx), instance.id], () => resolve()));
+    await dbHelpers.run('UPDATE WorkflowInstance SET context_json = $1 WHERE id = $2', [stringifyJson(ctx), instance.id]);
   },
 
   // Handler gửi thông báo phê duyệt
@@ -630,11 +400,11 @@ Hệ thống Workflow
     }
 
     // Đánh dấu đã gửi thông báo
-    const row = await new Promise((resolve) => db.get('SELECT context_json FROM WorkflowInstance WHERE id = ?', [instance.id], (e, r) => resolve(r)));
+    const row = await dbHelpers.get('SELECT context_json FROM WorkflowInstance WHERE id = $1', [instance.id]);
     const ctx = safeParseJson(row && row.context_json);
     ctx.approvalNotificationSent = true;
     ctx.notificationSentAt = new Date().toISOString();
-    await new Promise((resolve) => db.run('UPDATE WorkflowInstance SET context_json = ? WHERE id = ?', [stringifyJson(ctx), instance.id], () => resolve()));
+    await dbHelpers.run('UPDATE WorkflowInstance SET context_json = $1 WHERE id = $2', [stringifyJson(ctx), instance.id]);
   },
 
   // Handler gửi email generic
@@ -668,11 +438,8 @@ Hệ thống Workflow
 };
 
 async function getInstanceContext(instanceId) {
-  return new Promise((resolve) => {
-    db.get('SELECT context_json FROM WorkflowInstance WHERE id = ?', [instanceId], (e, r) => {
-      resolve(safeParseJson(r && r.context_json));
-    });
-  });
+  const row = await dbHelpers.get('SELECT context_json FROM WorkflowInstance WHERE id = $1', [instanceId]);
+  return safeParseJson(row && row.context_json);
 }
 
 function orderTransitionsForEval(list) {
@@ -700,7 +467,7 @@ async function runServiceTask({ activityDef, instance, activityInstanceId, depth
   }
 
   // Hoàn thành service activity
-  await new Promise((resolve) => db.run('UPDATE ActivityInstance SET status = ? WHERE id = ?', ['Completed', activityInstanceId], () => resolve()));
+  await dbHelpers.run('UPDATE ActivityInstance SET status = $1 WHERE id = $2', ['Completed', activityInstanceId]);
 
   // Xử lý gateway logic
   if (activityDef.type === 'exclusiveGateway') {
@@ -714,7 +481,7 @@ async function runServiceTask({ activityDef, instance, activityInstanceId, depth
 }
 
 async function handleExclusiveGateway({ activityDef, instance, activityInstanceId, context, depth }) {
-  const allTrans = await new Promise((resolve) => db.all('SELECT * FROM TransitionDefinition WHERE from_activity_id = ? ORDER BY id ASC', [activityDef.id], (e, rows) => resolve(rows || [])));
+  const allTrans = await dbHelpers.all('SELECT * FROM TransitionDefinition WHERE from_activity_id = $1 ORDER BY id ASC', [activityDef.id]);
   const ordered = orderTransitionsForEval(allTrans);
   let trans = chooseTransition(ordered, null, context);
   if (!trans) {
@@ -856,11 +623,13 @@ function insertOutbox(event_type, payload) {
   ));
 }
 
-function processOutboxBatch() {
-  db.all("SELECT * FROM Outbox WHERE status IS NULL OR status = 'PENDING' LIMIT 10", async (err, rows) => {
-    if (err || !rows || rows.length === 0) return;
+async function processOutboxBatch() {
+  try {
+    const rows = await dbHelpers.all("SELECT * FROM OutboxEvent WHERE status IS NULL OR status = 'PENDING' LIMIT 10");
+    if (!rows || rows.length === 0) return;
+    
     for (const r of rows) {
-      const payload = safeParseJson(r.payload_json);
+      const payload = safeParseJson(r.payload);
       let status = 'DONE';
       let error = null;
       try {
@@ -876,29 +645,34 @@ function processOutboxBatch() {
         status = 'FAILED';
         error = (e && e.message) || String(e);
       }
-      db.run(`UPDATE Outbox SET status = ?, error = ?, processed_at = datetime('now') WHERE id = ?`, [status, error, r.id]);
+      await dbHelpers.run(`UPDATE OutboxEvent SET status = $1, error = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`, [status, error, r.id]);
     }
-  });
+  } catch (error) {
+    console.error('Outbox processing error:', error);
+  }
 }
 
 setInterval(processOutboxBatch, 3000);
 
 // Outbox APIs
-app.get('/api/outbox', (req, res) => {
-  const status = req.query && req.query.status;
-  const limit = Math.min(parseInt((req.query && req.query.limit) || '50', 10) || 50, 200);
-  let sql = 'SELECT * FROM Outbox';
-  const params = [];
-  if (status) {
-    sql += ' WHERE status = ?';
-    params.push(status);
-  }
-  sql += ' ORDER BY id DESC LIMIT ?';
-  params.push(limit);
-  db.all(sql, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+app.get('/api/outbox', async (req, res) => {
+  try {
+    const status = req.query && req.query.status;
+    const limit = Math.min(parseInt((req.query && req.query.limit) || '50', 10) || 50, 200);
+    let sql = 'SELECT * FROM OutboxEvent';
+    const params = [];
+    if (status) {
+      sql += ' WHERE status = $1';
+      params.push(status);
+    }
+    sql += ' ORDER BY id DESC LIMIT $' + (params.length + 1);
+    params.push(limit);
+    
+    const rows = await dbHelpers.all(sql, params);
     res.json(rows || []);
-  });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/api/outbox/:id/retry', idParamValidation, handleValidationErrors, (req, res) => {
